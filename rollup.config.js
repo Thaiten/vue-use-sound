@@ -1,9 +1,11 @@
-import path from 'path'
-import ts from 'rollup-plugin-typescript2'
-import replace from '@rollup/plugin-replace'
-import resolve from '@rollup/plugin-node-resolve'
+// @ts-nocheck
 import commonjs from '@rollup/plugin-commonjs'
+import resolve from '@rollup/plugin-node-resolve'
+import replace from '@rollup/plugin-replace'
 import pascalcase from 'pascalcase'
+import path from 'path'
+import del from 'rollup-plugin-delete'
+import ts from 'rollup-plugin-typescript2'
 
 const pkg = require('./package.json')
 const name = pkg.name
@@ -12,10 +14,12 @@ function getAuthors(pkg) {
   const { contributors, author } = pkg
 
   const authors = new Set()
+
   if (contributors && contributors)
     contributors.forEach((contributor) => {
       authors.add(contributor.name)
     })
+
   if (author) authors.add(author.name)
 
   return Array.from(authors).join(', ')
@@ -33,26 +37,28 @@ let hasTSChecked = false
 const outputConfigs = {
   // each file name has the format: `dist/${name}.${format}.js`
   // format being a key of this object
-  'esm-bundler': {
-    dir: 'dist/',
+  esm: {
+    dir: 'dist/esm',
     format: `es`,
+  },
+  cjs: {
+    dir: 'dist/cjs',
+    format: 'cjs',
+    exports: 'named',
+  },
+  global: {
+    dir: 'dist/global',
+    format: 'iife',
   },
 }
 
 const allFormats = Object.keys(outputConfigs)
 const packageFormats = allFormats
 const packageConfigs = packageFormats.map((format) =>
-  createConfig(format, outputConfigs[format]),
+  format === 'global'
+    ? createMinifiedConfig(format)
+    : createConfig(format, outputConfigs[format]),
 )
-
-// only add the production ready if we are bundling the options
-packageFormats.forEach((format) => {
-  if (format === 'cjs') {
-    packageConfigs.push(createProductionConfig(format))
-  } else if (format === 'global') {
-    packageConfigs.push(createMinifiedConfig(format))
-  }
-})
 
 export default packageConfigs
 
@@ -97,6 +103,10 @@ function createConfig(format, output, plugins = []) {
 
   const external = ['vue']
 
+  if (!isGlobalBuild) {
+    external.push('vue-demi')
+  }
+
   const nodePlugins = [resolve(), commonjs()]
 
   return {
@@ -104,12 +114,13 @@ function createConfig(format, output, plugins = []) {
     // Global and Browser ESM builds inlines everything so that they can be
     // used alone.
     external,
+    inlineDynamicImports: isGlobalBuild,
     plugins: [
+      del({ targets: `dist/${format}` }),
       tsPlugin,
       createReplacePlugin(
         isProductionBuild,
         isBundlerESMBuild,
-        // isBrowserBuild?
         isGlobalBuild || isRawESMBuild || isBundlerESMBuild,
         isGlobalBuild,
         isNodeBuild,
@@ -118,11 +129,6 @@ function createConfig(format, output, plugins = []) {
       ...plugins,
     ],
     output,
-    // onwarn: (msg, warn) => {
-    //   if (!/Circular/.test(msg)) {
-    //     warn(msg)
-    //   }
-    // },
   }
 }
 
@@ -151,6 +157,7 @@ function createReplacePlugin(
     // is targeting Node (SSR)?
     __NODE_JS__: isNodeBuild,
   }
+
   // allow inline overrides like
   //__RUNTIME_COMPILE__=true yarn build
   Object.keys(replacements).forEach((key) => {
@@ -158,22 +165,17 @@ function createReplacePlugin(
       replacements[key] = process.env[key]
     }
   })
-  return replace(replacements)
-}
 
-function createProductionConfig(format) {
-  return createConfig(format, {
-    file: `dist/${name}.${format}.prod.js`,
-    format: outputConfigs[format].format,
-  })
+  return replace(replacements)
 }
 
 function createMinifiedConfig(format) {
   const { terser } = require('rollup-plugin-terser')
+
   return createConfig(
     format,
     {
-      file: `dist/${name}.${format}.prod.js`,
+      dir: `dist/${format}/`,
       format: outputConfigs[format].format,
     },
     [
